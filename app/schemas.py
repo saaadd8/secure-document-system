@@ -58,3 +58,19 @@ class UserPublic(BaseModel):
     email: EmailStr
     role: str
     created_at: datetime
+
+
+class DocumentPublic(BaseModel):
+    """Document metadata. Never includes file bytes."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    owner_id: int
+    filename: str
+    file_path: str
+    document_type: str
+    file_size: int
+    sha256_hash: str
+    created_at: datetime
+    updated_at: datetime
