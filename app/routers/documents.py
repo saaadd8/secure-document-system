@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.config import ROOT_DIR
@@ -28,6 +29,21 @@ def _is_pdf_upload(filename: str, content_type: str | None) -> bool:
     return True
 
 
+def _resolve_stored_file(file_path: str) -> Path | None:
+    """Resolve a stored path under ROOT_DIR. Return None if it escapes or is missing."""
+    root = ROOT_DIR.resolve()
+    stored = Path(file_path)
+    candidate = stored if stored.is_absolute() else root / stored
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
 @router.get("", response_model=list[DocumentPublic])
 def list_documents(
     current_user: User = Depends(get_current_user),
@@ -39,6 +55,34 @@ def list_documents(
         .filter(Document.owner_id == current_user.id)
         .order_by(Document.created_at.desc())
         .all()
+    )
+
+
+@router.get("/{document_id}/download")
+def download_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send the stored PDF. Requires a valid JWT and ownership."""
+    document = db.get(Document, document_id)
+    if document is None or document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    stored_file = _resolve_stored_file(document.file_path)
+    if stored_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    return FileResponse(
+        path=stored_file,
+        filename=document.filename,
+        media_type=PDF_CONTENT_TYPE,
     )
 
 
