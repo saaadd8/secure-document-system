@@ -74,3 +74,13 @@ class DocumentPublic(BaseModel):
     sha256_hash: str
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentVerify(BaseModel):
+    """Integrity check result for a stored PDF."""
+
+    document_id: int
+    filename: str
+    valid: bool
+    stored_hash: str
+    current_hash: str

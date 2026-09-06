@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import ROOT_DIR
 from app.database import get_db
 from app.models import Document, User
-from app.schemas import DocumentPublic
+from app.schemas import DocumentPublic, DocumentVerify
 from app.security import get_current_user
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -83,6 +83,38 @@ def download_document(
         path=stored_file,
         filename=document.filename,
         media_type=PDF_CONTENT_TYPE,
+    )
+
+
+@router.get("/{document_id}/verify", response_model=DocumentVerify)
+def verify_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Compare the on-disk SHA-256 with the hash stored for this document."""
+    document = db.get(Document, document_id)
+    if document is None or document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    stored_file = _resolve_stored_file(document.file_path)
+    if stored_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    current_hash = hashlib.sha256(stored_file.read_bytes()).hexdigest()
+    stored_hash = document.sha256_hash
+    return DocumentVerify(
+        document_id=document.id,
+        filename=document.filename,
+        valid=stored_hash == current_hash,
+        stored_hash=stored_hash,
+        current_hash=current_hash,
     )
 
 
