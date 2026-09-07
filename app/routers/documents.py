@@ -1,15 +1,25 @@
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit_event
 from app.config import ROOT_DIR
 from app.database import get_db
-from app.models import Document, User
-from app.schemas import DocumentPublic, DocumentVerify
+from app.models import Document, DocumentShare, User
+from app.schemas import (
+    DocumentPublic,
+    DocumentShareCreate,
+    DocumentSharePublic,
+    DocumentVerify,
+    SharedDocumentPublic,
+)
 from app.security import get_current_user
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -58,19 +68,214 @@ def list_documents(
     )
 
 
-@router.get("/{document_id}/download")
-def download_document(
+def _get_owned_document_or_404(
     document_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Send the stored PDF. Requires a valid JWT and ownership."""
+    current_user: User,
+    db: Session,
+) -> Document:
+    """Load an owned document without disclosing documents owned by others."""
     document = db.get(Document, document_id)
     if document is None or document.owner_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found",
         )
+    return document
+
+
+@router.post(
+    "/{document_id}/shares",
+    response_model=DocumentSharePublic,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_document_share(
+    document_id: int,
+    payload: DocumentShareCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Grant a registered user access to an owned document."""
+    document = _get_owned_document_or_404(document_id, current_user, db)
+    recipient = db.query(User).filter(User.email == payload.recipient_email).first()
+    if recipient is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recipient not found",
+        )
+    if recipient.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot share a document with yourself",
+        )
+
+    now = datetime.now(timezone.utc)
+    share = (
+        db.query(DocumentShare)
+        .filter(
+            DocumentShare.document_id == document.id,
+            DocumentShare.shared_with_user_id == recipient.id,
+        )
+        .first()
+    )
+    if share is not None:
+        is_active = share.revoked_at is None and (
+            share.expires_at is None or share.expires_at > now
+        )
+        if is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An active share already exists for this user",
+            )
+        share.permission = payload.permission
+        share.expires_at = payload.expires_at
+        share.revoked_at = None
+        share.created_at = now
+    else:
+        share = DocumentShare(
+            document_id=document.id,
+            shared_with_user_id=recipient.id,
+            permission=payload.permission,
+            expires_at=payload.expires_at,
+        )
+        db.add(share)
+
+    try:
+        record_audit_event(
+            db,
+            user_id=current_user.id,
+            document_id=document.id,
+            action="SHARE",
+            details=(
+                f"recipient_email={recipient.email}; permission={payload.permission}"
+            ),
+        )
+        db.commit()
+        db.refresh(share)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An active share already exists for this user",
+        ) from exc
+
+    return share
+
+
+@router.get("/{document_id}/shares", response_model=list[DocumentSharePublic])
+def list_document_shares(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all share records for an owned document."""
+    document = _get_owned_document_or_404(document_id, current_user, db)
+    return (
+        db.query(DocumentShare)
+        .filter(DocumentShare.document_id == document.id)
+        .order_by(DocumentShare.created_at.desc())
+        .all()
+    )
+
+
+@router.get("/shared", response_model=list[SharedDocumentPublic])
+def list_shared_documents(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return documents with an active share for the current user."""
+    now = datetime.now(timezone.utc)
+    shares = (
+        db.query(DocumentShare)
+        .join(Document)
+        .filter(
+            DocumentShare.shared_with_user_id == current_user.id,
+            DocumentShare.revoked_at.is_(None),
+            or_(
+                DocumentShare.expires_at.is_(None),
+                DocumentShare.expires_at > now,
+            ),
+        )
+        .order_by(DocumentShare.created_at.desc())
+        .all()
+    )
+    return [
+        SharedDocumentPublic(
+            document=share.document,
+            permission=share.permission,
+            expires_at=share.expires_at,
+        )
+        for share in shares
+    ]
+
+
+@router.delete(
+    "/{document_id}/shares/{share_id}",
+    response_model=DocumentSharePublic,
+)
+def revoke_document_share(
+    document_id: int,
+    share_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke a share without removing its database record."""
+    document = _get_owned_document_or_404(document_id, current_user, db)
+    share = db.get(DocumentShare, share_id)
+    if share is None or share.document_id != document.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Share not found",
+        )
+
+    share.revoked_at = datetime.now(timezone.utc)
+    record_audit_event(
+        db,
+        user_id=current_user.id,
+        document_id=document.id,
+        action="REVOKE_SHARE",
+        details=f"share_id={share.id}; recipient_user_id={share.shared_with_user_id}",
+    )
+    db.commit()
+    db.refresh(share)
+    return share
+
+
+@router.get("/{document_id}/download")
+def download_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send the stored PDF to its owner or a user with download access."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    access_type = "owner"
+    if document.owner_id != current_user.id:
+        now = datetime.now(timezone.utc)
+        share = (
+            db.query(DocumentShare)
+            .filter(
+                DocumentShare.document_id == document.id,
+                DocumentShare.shared_with_user_id == current_user.id,
+                DocumentShare.revoked_at.is_(None),
+                or_(
+                    DocumentShare.expires_at.is_(None),
+                    DocumentShare.expires_at > now,
+                ),
+            )
+            .first()
+        )
+        if share is None or share.permission != "DOWNLOAD":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+        access_type = "shared_download"
 
     stored_file = _resolve_stored_file(document.file_path)
     if stored_file is None:
@@ -78,6 +283,15 @@ def download_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found",
         )
+
+    record_audit_event(
+        db,
+        user_id=current_user.id,
+        document_id=document.id,
+        action="DOWNLOAD",
+        details=f"access={access_type}",
+    )
+    db.commit()
 
     return FileResponse(
         path=stored_file,
@@ -109,10 +323,19 @@ def verify_document(
 
     current_hash = hashlib.sha256(stored_file.read_bytes()).hexdigest()
     stored_hash = document.sha256_hash
+    is_valid = stored_hash == current_hash
+    record_audit_event(
+        db,
+        user_id=current_user.id,
+        document_id=document.id,
+        action="VERIFY",
+        details=f"valid={str(is_valid).lower()}",
+    )
+    db.commit()
     return DocumentVerify(
         document_id=document.id,
         filename=document.filename,
-        valid=stored_hash == current_hash,
+        valid=is_valid,
         stored_hash=stored_hash,
         current_hash=current_hash,
     )
@@ -176,6 +399,14 @@ async def upload_document(
     )
     try:
         db.add(document)
+        db.flush()
+        record_audit_event(
+            db,
+            user_id=current_user.id,
+            document_id=document.id,
+            action="UPLOAD",
+            details=f"filename={original_name}; file_size={file_size}",
+        )
         db.commit()
         db.refresh(document)
     except Exception as exc:

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -84,3 +85,46 @@ class DocumentVerify(BaseModel):
     valid: bool
     stored_hash: str
     current_hash: str
+
+
+class DocumentShareCreate(BaseModel):
+    """Payload for granting a user access to a document."""
+
+    recipient_email: EmailStr
+    permission: Literal["VIEW", "DOWNLOAD"]
+    expires_at: datetime | None = None
+
+
+class DocumentSharePublic(BaseModel):
+    """Safe document-sharing metadata."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_id: int
+    shared_with_user_id: int
+    permission: Literal["VIEW", "DOWNLOAD"]
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+
+
+class SharedDocumentPublic(BaseModel):
+    """An active share and the document metadata available to its recipient."""
+
+    document: DocumentPublic
+    permission: Literal["VIEW", "DOWNLOAD"]
+    expires_at: datetime | None
+
+
+class AuditLogPublic(BaseModel):
+    """Audit-log metadata available to administrators."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int | None
+    document_id: int | None
+    action: str
+    timestamp: datetime
+    details: str | None

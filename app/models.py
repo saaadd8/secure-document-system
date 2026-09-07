@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -24,6 +24,10 @@ class User(Base):
     documents: Mapped[list["Document"]] = relationship(
         back_populates="owner",
     )
+    received_document_shares: Mapped[list["DocumentShare"]] = relationship(
+        back_populates="shared_with_user",
+    )
+    audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="user")
 
 
 class Document(Base):
@@ -54,3 +58,78 @@ class Document(Base):
         nullable=False,
     )
     owner: Mapped["User"] = relationship(back_populates="documents")
+    shares: Mapped[list["DocumentShare"]] = relationship(back_populates="document")
+    audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="document")
+
+
+class DocumentShare(Base):
+    """A recipient's permission to access a document owned by another user."""
+
+    __tablename__ = "document_shares"
+    __table_args__ = (
+        CheckConstraint(
+            "permission IN ('VIEW', 'DOWNLOAD')",
+            name="ck_document_shares_permission",
+        ),
+        UniqueConstraint(
+            "document_id",
+            "shared_with_user_id",
+            name="uq_document_shares_document_recipient",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id"),
+        nullable=False,
+        index=True,
+    )
+    shared_with_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+    permission: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    document: Mapped["Document"] = relationship(back_populates="shares")
+    shared_with_user: Mapped["User"] = relationship(
+        back_populates="received_document_shares",
+    )
+
+
+class AuditLog(Base):
+    """A record of a document-related action performed by a user."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    details: Mapped[str] = mapped_column(String(1000), nullable=True)
+    user: Mapped["User"] = relationship(back_populates="audit_logs")
+    document: Mapped["Document"] = relationship(back_populates="audit_logs")
