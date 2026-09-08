@@ -7,6 +7,29 @@ export class ApiError extends Error {
   }
 }
 
+function formatValidationLocation(location) {
+  if (!Array.isArray(location)) return "";
+  const field = location.filter((part) => part !== "body").at(-1);
+  if (typeof field !== "string") return "";
+  return `${field.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())}: `;
+}
+
+function formatErrorDetail(detail) {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((issue) => {
+        if (typeof issue === "string") return issue;
+        if (issue && typeof issue.msg === "string") return `${formatValidationLocation(issue.loc)}${issue.msg}`;
+        return null;
+      })
+      .filter(Boolean);
+    if (messages.length) return messages.join(" ");
+  }
+  if (detail && typeof detail.message === "string") return detail.message;
+  return "Request failed. Please try again.";
+}
+
 async function request(path, { method = "GET", token, body, responseType = "json" } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -20,7 +43,7 @@ async function request(path, { method = "GET", token, body, responseType = "json
 
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new ApiError(payload?.detail || "Request failed", response.status);
+    throw new ApiError(formatErrorDetail(payload?.detail), response.status);
   }
 
   if (responseType === "download") {
