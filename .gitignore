@@ -6,3 +6,5 @@ __pycache__/
 .idea/
 .vscode/
 storage/
+.pytest_cache/
+.pytest-tmp/
