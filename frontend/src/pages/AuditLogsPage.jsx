@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, auditLogsApi } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 
-const ACTIONS = ["UPLOAD", "DOWNLOAD", "VERIFY", "SHARE", "REVOKE_SHARE"];
+const ACTIONS = ["UPLOAD", "VIEW", "DOWNLOAD", "VERIFY", "SHARE", "REVOKE_SHARE"];
 
 function formatDate(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(value));

@@ -300,6 +300,68 @@ def download_document(
     )
 
 
+@router.get("/{document_id}/view")
+def view_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Display the stored PDF to its owner or an active share recipient."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    access_type = "owner"
+    if document.owner_id != current_user.id:
+        now = datetime.now(timezone.utc)
+        share = (
+            db.query(DocumentShare)
+            .filter(
+                DocumentShare.document_id == document.id,
+                DocumentShare.shared_with_user_id == current_user.id,
+                DocumentShare.permission.in_(("VIEW", "DOWNLOAD")),
+                DocumentShare.revoked_at.is_(None),
+                or_(
+                    DocumentShare.expires_at.is_(None),
+                    DocumentShare.expires_at > now,
+                ),
+            )
+            .first()
+        )
+        if share is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+        access_type = f"shared_{share.permission.lower()}"
+
+    stored_file = _resolve_stored_file(document.file_path)
+    if stored_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    record_audit_event(
+        db,
+        user_id=current_user.id,
+        document_id=document.id,
+        action="VIEW",
+        details=f"access={access_type}",
+    )
+    db.commit()
+
+    return FileResponse(
+        path=stored_file,
+        filename=document.filename,
+        media_type=PDF_CONTENT_TYPE,
+        content_disposition_type="inline",
+    )
+
+
 @router.get("/{document_id}/verify", response_model=DocumentVerify)
 def verify_document(
     document_id: int,

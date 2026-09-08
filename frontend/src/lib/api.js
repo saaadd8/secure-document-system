@@ -49,6 +49,8 @@ export const documentsApi = {
   },
   download: (token, documentId) =>
     request(`/documents/${documentId}/download`, { token, responseType: "download" }),
+  view: (token, documentId) =>
+    request(`/documents/${documentId}/view`, { token, responseType: "download" }),
   verify: (token, documentId) => request(`/documents/${documentId}/verify`, { token }),
   createShare: (token, documentId, payload) =>
     request(`/documents/${documentId}/shares`, { method: "POST", token, body: payload }),
