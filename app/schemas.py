@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.config import settings
+
 
 class UserRegister(BaseModel):
     """JSON body for POST /auth/register."""
@@ -13,9 +15,17 @@ class UserRegister(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def password_not_empty(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("Password cannot be empty")
+    def password_is_strong(cls, value: str) -> str:
+        if len(value) < settings.password_min_length:
+            raise ValueError(
+                f"Password must be at least {settings.password_min_length} characters long"
+            )
+        if not any(character.islower() for character in value):
+            raise ValueError("Password must include a lowercase letter")
+        if not any(character.isupper() for character in value):
+            raise ValueError("Password must include an uppercase letter")
+        if not any(character.isdigit() for character in value):
+            raise ValueError("Password must include a number")
         return value
 
 

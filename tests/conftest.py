@@ -8,7 +8,7 @@ an in-memory SQLite database and a pytest-managed temporary storage directory.
 import os
 
 os.environ["DATABASE_URL"] = "sqlite://"
-os.environ["JWT_SECRET"] = "test-secret-not-for-development"
+os.environ["JWT_SECRET"] = "test-secret-for-isolated-api-security-suite"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +20,7 @@ import app.database as database
 from app.database import Base
 from app.main import app
 from app.routers import documents as documents_router
+from app.security import login_attempt_limiter
 
 
 TEST_ENGINE = create_engine(
@@ -41,7 +42,9 @@ def isolated_database():
     """Start every test with empty tables in the in-memory test database."""
     Base.metadata.drop_all(bind=TEST_ENGINE)
     Base.metadata.create_all(bind=TEST_ENGINE)
+    login_attempt_limiter.clear()
     yield
+    login_attempt_limiter.clear()
     Base.metadata.drop_all(bind=TEST_ENGINE)
 
 

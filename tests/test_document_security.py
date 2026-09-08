@@ -2,10 +2,12 @@
 
 from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
+from pydantic import ValidationError
 
+from app.config import Settings, settings
 from app.models import AuditLog
-from app.config import settings
 
 
 def build_pdf():
@@ -32,7 +34,7 @@ def build_pdf():
 
 
 PDF_BYTES = build_pdf()
-PASSWORD = "correct-horse-battery-staple"
+PASSWORD = "CorrectHorseBattery1"
 
 
 def register_user(client, email, name="Test User"):
@@ -102,6 +104,91 @@ def test_valid_login_returns_a_bearer_token(client):
     assert response.status_code == 200
     assert response.json()["token_type"] == "bearer"
     assert response.json()["access_token"]
+
+
+@pytest.mark.parametrize("password", ["short", "alllowercasepassword", "ALLUPPERCASEPASSWORD", "NoDigitsHerePassword"])
+def test_weak_registration_passwords_are_rejected(client, password):
+    response = client.post(
+        "/auth/register",
+        json={"name": "Weak Password", "email": "weak@example.com", "password": password},
+    )
+
+    assert response.status_code == 422
+
+
+def test_successful_login_resets_failed_attempt_state(client, monkeypatch):
+    register_user(client, "reset@example.com")
+    monkeypatch.setattr(settings, "login_max_failed_attempts", 3)
+
+    first_failure = client.post(
+        "/auth/login",
+        json={"email": "reset@example.com", "password": "wrong-password"},
+    )
+    successful_login = client.post(
+        "/auth/login",
+        json={"email": "reset@example.com", "password": PASSWORD},
+    )
+    second_failure = client.post(
+        "/auth/login",
+        json={"email": "reset@example.com", "password": "wrong-password"},
+    )
+
+    assert first_failure.status_code == 401
+    assert successful_login.status_code == 200
+    assert second_failure.status_code == 401
+
+
+def test_repeated_failed_logins_are_rate_limited(client, monkeypatch):
+    register_user(client, "limited@example.com")
+    monkeypatch.setattr(settings, "login_max_failed_attempts", 3)
+
+    responses = [
+        client.post(
+            "/auth/login",
+            json={"email": "limited@example.com", "password": "wrong-password"},
+        )
+        for _ in range(3)
+    ]
+    locked_response = client.post(
+        "/auth/login",
+        json={"email": "limited@example.com", "password": PASSWORD},
+    )
+
+    assert [response.status_code for response in responses] == [401, 401, 429]
+    assert locked_response.status_code == 429
+
+
+def test_expired_jwt_is_rejected(client):
+    user, _ = create_user(client, "expired-token@example.com")
+    expired_token = jwt.encode(
+        {
+            "sub": str(user["id"]),
+            "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
+        },
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    response = client.get(
+        "/documents",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_settings_require_a_configured_jwt_secret(monkeypatch):
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, database_url="sqlite://")
+
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            database_url="sqlite://",
+            jwt_secret="a" * 32,
+        )
 
 
 def test_missing_and_invalid_tokens_are_rejected(client):

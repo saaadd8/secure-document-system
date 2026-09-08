@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import TokenResponse, UserLogin, UserMe, UserPublic, UserRegister
-from app.security import create_access_token, get_current_user, hash_password, verify_password
+from app.security import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    login_attempt_limiter,
+    verify_password,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,13 +44,26 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
 @router.post("/login", response_model=TokenResponse)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
     """Verify email and password, then return a JWT access token."""
+    login_key = payload.email.lower()
+    if login_attempt_limiter.is_limited(login_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Please try again later.",
+        )
+
     user = db.query(User).filter(User.email == payload.email).first()
     if user is None or not verify_password(payload.password, user.password_hash):
+        if login_attempt_limiter.record_failure(login_key):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. Please try again later.",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
+    login_attempt_limiter.reset(login_key)
     return TokenResponse(access_token=create_access_token(user.id))
 
 
