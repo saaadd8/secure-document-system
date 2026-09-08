@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-only-change-me"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    max_upload_bytes: int = 10 * 1024 * 1024
 
 
 settings = Settings()

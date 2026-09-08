@@ -5,9 +5,33 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models import AuditLog
+from app.config import settings
 
 
-PDF_BYTES = b"%PDF-1.4\n% secure document test fixture\n%%EOF\n"
+def build_pdf():
+    """Return a small, structurally valid one-page PDF without external fixtures."""
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+    ]
+    document = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for obj in objects:
+        offsets.append(len(document))
+        document.extend(obj)
+    startxref = len(document)
+    document.extend(b"xref\n0 4\n0000000000 65535 f \n")
+    for offset in offsets:
+        document.extend(f"{offset:010d} 00000 n \n".encode())
+    document.extend(
+        b"trailer\n<< /Size 4 /Root 1 0 R >>\n"
+        + f"startxref\n{startxref}\n%%EOF\n".encode()
+    )
+    return bytes(document)
+
+
+PDF_BYTES = build_pdf()
 PASSWORD = "correct-horse-battery-staple"
 
 
@@ -245,6 +269,31 @@ def test_upload_validation_rejects_invalid_files(
     )
 
     assert response.status_code == expected_status
+
+
+def test_upload_rejects_a_pdf_exceeding_the_configured_size_limit(client, monkeypatch):
+    _, owner_headers = create_user(client, "owner@example.com", "Owner")
+    monkeypatch.setattr(settings, "max_upload_bytes", len(PDF_BYTES) - 1)
+
+    response = client.post(
+        "/documents/upload",
+        headers=owner_headers,
+        files={"file": ("too-large.pdf", PDF_BYTES, "application/pdf")},
+    )
+
+    assert response.status_code == 413
+
+
+def test_upload_rejects_fake_pdf_content(client):
+    _, owner_headers = create_user(client, "owner@example.com", "Owner")
+
+    response = client.post(
+        "/documents/upload",
+        headers=owner_headers,
+        files={"file": ("fake.pdf", b"not a PDF", "application/pdf")},
+    )
+
+    assert response.status_code == 415
 
 
 def test_successful_operations_create_expected_audit_events(client, session):

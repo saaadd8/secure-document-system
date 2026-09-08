@@ -5,12 +5,14 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit_event
-from app.config import ROOT_DIR
+from app.config import ROOT_DIR, settings
 from app.database import get_db
 from app.models import Document, DocumentShare, User
 from app.schemas import (
@@ -26,16 +28,30 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 STORAGE_DIR = ROOT_DIR / "storage" / "documents"
 PDF_CONTENT_TYPE = "application/pdf"
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def _is_pdf_upload(filename: str, content_type: str | None) -> bool:
-    """MVP check: original name must end with .pdf and type must be PDF if provided."""
+    """Reject uploads whose supplied filename or media type is not PDF-like."""
     if not filename.lower().endswith(".pdf"):
         return False
     if content_type:
         media_type = content_type.split(";")[0].strip().lower()
         if media_type and media_type != PDF_CONTENT_TYPE:
             return False
+    return True
+
+
+def _is_valid_pdf(file_path: Path) -> bool:
+    """Validate PDF structure with a strict parser before retaining the upload."""
+    try:
+        with file_path.open("rb") as pdf_file:
+            reader = PdfReader(pdf_file, strict=True)
+            # Parsing the page tree catches malformed PDFs beyond a header check.
+            if not reader.is_encrypted:
+                len(reader.pages)
+    except (OSError, PdfReadError, ValueError):
+        return False
     return True
 
 
@@ -428,28 +444,63 @@ async def upload_document(
     if len(original_name) > 255:
         original_name = original_name[:255]
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is empty",
-        )
-
-    file_size = len(contents)
-    sha256_hash = hashlib.sha256(contents).hexdigest()
-
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     stored_name = f"{uuid4().hex}.pdf"
     stored_path = STORAGE_DIR / stored_name
+    temporary_path = STORAGE_DIR / f".{uuid4().hex}.uploading"
     relative_path = stored_path.relative_to(ROOT_DIR).as_posix()
 
+    file_size = 0
+    hasher = hashlib.sha256()
     try:
-        stored_path.write_bytes(contents)
+        with temporary_path.open("xb") as destination:
+            while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+                file_size += len(chunk)
+                if file_size > settings.max_upload_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            "Uploaded file exceeds the maximum allowed size of "
+                            f"{settings.max_upload_bytes} bytes"
+                        ),
+                    )
+                hasher.update(chunk)
+                destination.write(chunk)
     except OSError as exc:
+        temporary_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not save uploaded file",
         ) from exc
+    except HTTPException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    if not file_size:
+        temporary_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty",
+        )
+    if not _is_valid_pdf(temporary_path):
+        temporary_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Uploaded file is not a valid PDF",
+        )
+
+    try:
+        temporary_path.replace(stored_path)
+    except OSError as exc:
+        temporary_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not save uploaded file",
+        ) from exc
+
+    sha256_hash = hasher.hexdigest()
 
     document = Document(
         owner_id=current_user.id,
